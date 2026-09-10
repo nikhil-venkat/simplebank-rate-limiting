@@ -24,6 +24,7 @@ import (
 	"github.com/techschool/simplebank/gapi"
 	"github.com/techschool/simplebank/mail"
 	"github.com/techschool/simplebank/pb"
+	"github.com/techschool/simplebank/ratelimit"
 	"github.com/techschool/simplebank/util"
 	"github.com/techschool/simplebank/worker"
 	"golang.org/x/sync/errgroup"
@@ -66,11 +67,17 @@ func main() {
 
 	taskDistributor := worker.NewRedisTaskDistributor(redisOpt)
 
+	// One limiter, shared by both servers. Constructing it here rather than
+	// inside each run* function is what makes the budget global: a client
+	// cannot get a second allowance by switching from HTTP to gRPC.
+	rateLimiter := newRateLimiter(config)
+
 	waitGroup, ctx := errgroup.WithContext(ctx)
 
 	runTaskProcessor(ctx, waitGroup, config, redisOpt, store)
-	runGatewayServer(ctx, waitGroup, config, store, taskDistributor)
-	runGrpcServer(ctx, waitGroup, config, store, taskDistributor)
+	runRateLimitSweeper(ctx, waitGroup, rateLimiter)
+	runGatewayServer(ctx, waitGroup, config, store, taskDistributor, rateLimiter)
+	runGrpcServer(ctx, waitGroup, config, store, taskDistributor, rateLimiter)
 
 	err = waitGroup.Wait()
 	if err != nil {
@@ -124,14 +131,20 @@ func runGrpcServer(
 	config util.Config,
 	store db.Store,
 	taskDistributor worker.TaskDistributor,
+	rateLimiter *ratelimit.Service,
 ) {
 	server, err := gapi.NewServer(config, store, taskDistributor)
 	if err != nil {
 		log.Fatal().Err(err).Msg("cannot create server")
 	}
 
-	gprcLogger := grpc.UnaryInterceptor(gapi.GrpcLogger)
-	grpcServer := grpc.NewServer(gprcLogger)
+	// Rate limit first, so a throttled call is turned away before the handler
+	// does any work. GrpcLogger still records everything that gets through.
+	grpcInterceptors := grpc.ChainUnaryInterceptor(
+		gapi.RateLimitInterceptor(rateLimiter),
+		gapi.GrpcLogger,
+	)
+	grpcServer := grpc.NewServer(grpcInterceptors)
 	pb.RegisterSimpleBankServer(grpcServer, server)
 	reflection.Register(grpcServer)
 
@@ -172,6 +185,7 @@ func runGatewayServer(
 	config util.Config,
 	store db.Store,
 	taskDistributor worker.TaskDistributor,
+	rateLimiter *ratelimit.Service,
 ) {
 	server, err := gapi.NewServer(config, store, taskDistributor)
 	if err != nil {
@@ -222,7 +236,11 @@ func runGatewayServer(
 		},
 		AllowCredentials: true,
 	})
-	handler := c.Handler(gapi.HttpLogger(mux))
+	// cors -> ratelimit -> logger -> mux. The rate limiter sits inside the
+	// CORS handler on purpose: a 429 written outside it would carry no
+	// Access-Control-Allow-Origin header, and the browser would report an
+	// opaque CORS failure instead of the rate limit the user actually hit.
+	handler := c.Handler(gapi.RateLimitMiddleware(rateLimiter, gapi.HttpLogger(mux)))
 
 	httpServer := &http.Server{
 		Handler: handler,
@@ -254,5 +272,50 @@ func runGatewayServer(
 
 		log.Info().Msg("HTTP gateway server is stopped")
 		return nil
+	})
+}
+
+// newRateLimiter loads the rate limit rules and builds the shared limiter.
+//
+// A config file that will not parse is fatal. Starting up with rules that
+// silently evaluated to nothing, while the operator believes the service is
+// protected, is worse than not starting at all.
+func newRateLimiter(config util.Config) *ratelimit.Service {
+	if !config.RateLimitEnabled {
+		log.Warn().Msg("rate limiting is disabled")
+		return ratelimit.NewService(&ratelimit.Config{Enabled: false})
+	}
+
+	path := config.RateLimitConfigPath
+	if path == "" {
+		path = "ratelimit.yaml"
+	}
+
+	rateLimitConfig, err := ratelimit.LoadConfig(path)
+	if err != nil {
+		log.Fatal().Err(err).Msg("cannot load rate limit config")
+	}
+
+	// RATE_LIMIT_ENABLED is the operational kill switch and outranks the file,
+	// so the limiter can be turned off with an environment variable alone.
+	rateLimitConfig.Enabled = true
+
+	log.Info().
+		Str("algorithm", rateLimitConfig.Algorithm).
+		Str("enforcement", rateLimitConfig.Enforcement).
+		Int("default_requests", rateLimitConfig.Default.Requests).
+		Str("default_per", rateLimitConfig.Default.Per.String()).
+		Int("default_burst", rateLimitConfig.Default.Burst).
+		Int("rules", len(rateLimitConfig.Rules)).
+		Msgf("rate limiting enabled from %s", path)
+
+	return ratelimit.NewService(rateLimitConfig)
+}
+
+// runRateLimitSweeper reclaims buckets for clients that have gone quiet, so
+// the per-IP map does not grow without bound.
+func runRateLimitSweeper(ctx context.Context, waitGroup *errgroup.Group, rateLimiter *ratelimit.Service) {
+	waitGroup.Go(func() error {
+		return rateLimiter.Run(ctx)
 	})
 }
