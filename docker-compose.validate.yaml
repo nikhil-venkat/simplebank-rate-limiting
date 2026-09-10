@@ -1,0 +1,12 @@
+# Overlay used by scripts/validate_ratelimit.sh.
+#
+# Swaps in a deliberately tiny budget so the limit can be tripped by hand from
+# a shell loop, without touching the ratelimit.yaml that ships.
+#
+#   docker compose -f docker-compose.yaml -f docker-compose.validate.yaml up
+services:
+  api:
+    environment:
+      - RATE_LIMIT_CONFIG_PATH=/app/ratelimit.validate.yaml
+    volumes:
+      - ./ratelimit.validate.yaml:/app/ratelimit.validate.yaml:ro

@@ -21,6 +21,11 @@ services:
     environment:
       - DB_SOURCE=postgresql://root:secret@postgres:5432/simple_bank?sslmode=disable
       - REDIS_ADDRESS=redis:6379
+      - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-true}
+    volumes:
+      # Mounted rather than baked in, so limits can be changed with an edit
+      # and a restart instead of a rebuild.
+      - ./ratelimit.yaml:/app/ratelimit.yaml:ro
     depends_on:
       - postgres
       - redis

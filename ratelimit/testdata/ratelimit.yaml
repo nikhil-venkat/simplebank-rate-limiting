@@ -1,0 +1,25 @@
+# Fixture used by the config loader tests. Deliberately tiny limits.
+enabled: true
+algorithm: token_bucket
+enforcement: all_clients
+
+default:
+  requests: 5
+  per: 1s
+  burst: 5
+
+exempt:
+  - 10.0.0.0/8
+  - 192.0.2.1
+
+rules:
+  - ip: 198.51.100.0/24
+    requests: 2
+    per: 1s
+    burst: 2
+  - ip: 198.51.100.7
+    requests: 50
+    per: 1s
+    burst: 50
+
+max_tracked_ips: 1000

@@ -42,6 +42,12 @@ sqlc:
 test:
 	go test -v -cover -short ./...
 
+test-ratelimit:
+	go test -race -count=1 ./ratelimit/... ./gapi/...
+
+validate-ratelimit:
+	./scripts/validate_ratelimit.sh
+
 dockertest:
 	docker compose -f docker-compose.test.yaml run --rm test ; \
 	docker compose -f docker-compose.test.yaml down
@@ -69,4 +75,4 @@ evans:
 redis:
 	docker run --name redis -p 6379:6379 -d redis:7-alpine
 
-.PHONY: network postgres createdb dropdb migrateup migratedown migrateup1 migratedown1 new_migration db_docs db_schema sqlc test dockertest server mock proto evans redis
+.PHONY: network postgres createdb dropdb migrateup migratedown migrateup1 migratedown1 new_migration db_docs db_schema sqlc test test-ratelimit validate-ratelimit dockertest server mock proto evans redis

@@ -13,6 +13,8 @@ The server exposes both **gRPC** (port 9090) and **HTTP** (port 8080, via grpc-g
 | `PATCH` | `/v1/update_user` | Update user profile                              | Yes           |
 | `GET`   | `/v1/verify_email` | Verify email address via link sent after signup  | No            |
 
+All four endpoints are rate limited per client IP. See [Rate limiting](#rate-limiting).
+
 Swagger documentation is served at `/swagger/` when the server is running.
 
 The same endpoints are available as gRPC methods on port 9090 (service `pb.SimpleBank`).
@@ -77,6 +79,136 @@ cd frontend
 npm install
 npm run dev
 ```
+
+## Rate limiting
+
+Requests are rate limited per client IP inside the application service layer,
+with no load balancer or proxy assumed in front of the service.
+
+**One budget per IP, shared by everything.** The HTTP gateway and the gRPC
+server are handed the same limiter at startup, so a client cannot get a second
+allowance by switching protocol. Every API draws on that one budget: spending
+it on `/v1/login_user` leaves nothing for `/v1/create_user`. No endpoint is
+given a larger or smaller allowance than any other.
+
+Both servers need their own enforcement point. The gateway is registered with
+`RegisterSimpleBankHandlerServer`, the in-process variant, so an HTTP request
+calls the service method as a plain Go function and never crosses a gRPC
+connection. A `grpc.UnaryInterceptor` therefore never runs for port 8080.
+`gapi.RateLimitMiddleware` covers HTTP, `gapi.RateLimitInterceptor` covers
+gRPC, and both are thin wrappers over the same `ratelimit.Service`.
+
+The client IP always comes from the TCP peer, never from `X-Forwarded-For`.
+With no proxy in front of the service that header is attacker-controlled, and
+a client that varied it could mint a fresh budget on every request.
+
+### Rules
+
+Limits live in [`ratelimit.yaml`](ratelimit.yaml), which is mounted into the
+container so it can be edited and applied with a restart rather than a rebuild.
+
+```yaml
+enabled: true
+algorithm: token_bucket     # or fixed_window
+enforcement: all_clients    # or listed_only
+
+default:                    # applies to any IP no rule matches
+  requests: 10
+  per: 1s
+  burst: 20
+
+exempt:                     # never limited, checked first
+  - 10.0.0.0/8
+
+rules:                      # per-IP and per-CIDR overrides
+  - ip: 203.0.113.42        # a single abusive client
+    requests: 1
+    per: 1s
+    burst: 1
+  - ip: 198.51.100.0/24     # a noisy partner range
+    requests: 5
+    per: 1s
+    burst: 10
+
+max_tracked_ips: 100000
+```
+
+Every `ip` accepts a bare address or a CIDR block, and the most specific prefix
+wins regardless of the order rules are written in. A malformed file is a fatal
+error at startup: booting with rules that silently parsed to nothing, while you
+believe the service is protected, is worse than not booting.
+
+| Algorithm | Behaviour | Trade-off |
+|---|---|---|
+| `token_bucket` (default) | Refills steadily up to `burst`, spends one token per request | Two numbers to tune |
+| `fixed_window` | Counts requests per window, resets on rollover | Up to 2x the limit can land across a window boundary |
+
+### When a client is throttled
+
+HTTP returns `429 Too Many Requests` with `Retry-After` in seconds, plus
+`X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset`. The body
+uses the same shape grpc-gateway produces for every other error:
+
+```json
+{
+  "code": 8,
+  "message": "rate limit exceeded: too many requests from your IP address, please retry after 2 seconds",
+  "details": [
+    { "@type": "type.googleapis.com/google.rpc.RetryInfo", "retry_delay": "2s" }
+  ]
+}
+```
+
+gRPC returns `ResourceExhausted` with the same message and the same `RetryInfo`
+detail attached.
+
+CORS preflights and the `/swagger/` static assets are not charged to the
+budget. Neither is an API call, and the Swagger UI pulls dozens of files on a
+single page load.
+
+### Validating it
+
+Run the end-to-end script. It brings up the stack with a deliberately tiny
+budget, trips the limit, and checks the response, the recovery, and the fact
+that the budget really is shared:
+
+```bash
+make validate-ratelimit
+```
+
+Add `--keep` to leave the stack running, or `--no-up` to check a server you
+started yourself.
+
+Run the unit and integration tests, including the race detector:
+
+```bash
+make test-ratelimit
+```
+
+To try it by hand, point the server at the small budget in
+[`ratelimit.validate.yaml`](ratelimit.validate.yaml) and loop:
+
+```bash
+for i in $(seq 1 10); do
+  curl -s -o /dev/null -w "%{http_code}\n" \
+    -X POST http://localhost:8080/v1/login_user \
+    -H 'Content-Type: application/json' \
+    -d '{"username":"someone","password":"secret123"}'
+done
+```
+
+> **Under Docker,** the API does not see `127.0.0.1`. It sees the gateway the
+> host reaches it through: `172.16.0.0/12` on Linux, `192.168.65.1` on Docker
+> Desktop for macOS. So a rule written for `127.0.0.1` has no effect on a
+> containerized run, and exempting either range would exempt all of your local
+> traffic. To find the address the server actually sees, trip the limit once
+> and read `client_ip` from the log:
+>
+> ```bash
+> docker compose logs api | grep "rate limit exceeded" | tail -1
+> ```
+>
+> Or run with `make server` on the host to test rules for specific addresses.
 
 ## Running tests
 
@@ -176,3 +308,5 @@ The server reads configuration from `app.env` (and environment variables, which 
 | `ACCESS_TOKEN_DURATION`| `1m`                             | Access token lifetime           |
 | `REFRESH_TOKEN_DURATION`| `24h`                           | Refresh token lifetime          |
 | `ALLOWED_ORIGINS`      | `http://localhost:3000`          | CORS allowed origins            |
+| `RATE_LIMIT_ENABLED`   | `true`                           | Master switch for rate limiting |
+| `RATE_LIMIT_CONFIG_PATH`| `ratelimit.yaml`                | Path to the rate limit rules    |

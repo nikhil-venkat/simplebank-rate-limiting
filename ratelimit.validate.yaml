@@ -1,0 +1,21 @@
+# Validation-only rules. Not for production.
+#
+# 5 requests per 10 seconds means one token refills every 2 seconds, slow
+# enough that a shell loop cannot accidentally earn extra budget mid-run, and
+# short enough that the recovery check does not take all day.
+enabled: true
+algorithm: token_bucket
+enforcement: all_clients
+
+default:
+  requests: 5
+  per: 10s
+  burst: 5
+
+# Empty on purpose. Under docker compose every request from the host arrives
+# from the bridge gateway address in 172.16.0.0/12, so exempting that range
+# would exempt the very traffic this script is trying to limit.
+exempt: []
+rules: []
+
+max_tracked_ips: 1000

@@ -45,7 +45,15 @@ const handleLogin = async () => {
       life: 3000
     })
   } catch (error: any) {
-    if (error.response && error.response.status === 404) {
+    if (error.response && error.response.status === 429) {
+      // Rate limited. The server sends Retry-After in seconds, and repeats the
+      // wait in the message body as a fallback for when the header is not
+      // exposed to the browser.
+      const retryAfter = Number(error.response.headers['retry-after'])
+      errorMessage.value = Number.isFinite(retryAfter) && retryAfter > 0
+        ? `Too many attempts. Please try again in ${retryAfter} second${retryAfter === 1 ? '' : 's'}.`
+        : (error.response.data?.message ?? 'Too many attempts. Please try again shortly.')
+    } else if (error.response && error.response.status === 404) {
       errorMessage.value = error.response.data.message
     } else {
       errorMessage.value = 'An error occurred. Please try again later'
@@ -53,7 +61,7 @@ const handleLogin = async () => {
 
     toast.add({
       severity: 'error',
-      summary: 'Login failed',
+      summary: error.response?.status === 429 ? 'Rate limited' : 'Login failed',
       detail: errorMessage.value,
       life: 3000
     })
