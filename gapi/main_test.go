@@ -3,8 +3,11 @@ package gapi
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 	"time"
+
+	"github.com/rs/zerolog"
 
 	"github.com/stretchr/testify/require"
 	db "github.com/techschool/simplebank/db/sqlc"
@@ -13,6 +16,13 @@ import (
 	"github.com/techschool/simplebank/worker"
 	"google.golang.org/grpc/metadata"
 )
+
+// TestMain silences the request logger. The handlers under test log every
+// request, and at default level the output buries the actual test failures.
+func TestMain(m *testing.M) {
+	zerolog.SetGlobalLevel(zerolog.Disabled)
+	os.Exit(m.Run())
+}
 
 func newTestServer(t *testing.T, store db.Store, taskDistributor worker.TaskDistributor) *Server {
 	config := util.Config{
