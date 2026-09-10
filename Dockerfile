@@ -9,6 +9,7 @@ FROM alpine:3.21
 WORKDIR /app
 COPY --from=builder /app/main .
 COPY app.env .
+COPY ratelimit.yaml .
 COPY start.sh .
 COPY wait-for.sh .
 COPY db/migration ./db/migration
