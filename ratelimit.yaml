@@ -1,0 +1,54 @@
+# Rate limiting rules, enforced per client IP inside the application service
+# layer. Shared by the HTTP gateway (8080) and the gRPC server (9090): one
+# budget per IP, spent by whichever port the client uses.
+#
+# Every API shares that budget. Spending it on /v1/login_user leaves nothing
+# for /v1/create_user. No endpoint gets a larger or smaller allowance.
+
+enabled: true
+
+# token_bucket: refills steadily, allows a configurable burst, no window
+#               boundary to game. The default.
+# fixed_window: simple counter that resets each window. Easier to explain,
+#               but up to 2x the limit can land across a window boundary.
+algorithm: token_bucket
+
+# all_clients: the `default` budget applies to everyone, `rules` are overrides.
+# listed_only: ONLY the IPs in `rules` are limited, everyone else passes.
+enforcement: all_clients
+
+# Budget for any client not matched by a rule below.
+default:
+  requests: 10
+  per: 1s
+  burst: 20
+
+# Never limited. Checked before `rules`.
+#
+# Note there is no docker gateway entry here on purpose. Under docker compose
+# the API sees the host as the bridge gateway (172.16.0.0/12 on Linux,
+# 192.168.65.1 on Docker Desktop for macOS), so exempting either would silently
+# exempt all local traffic and make the limiter look broken.
+exempt: []
+
+# Per-IP and per-CIDR overrides. Accepts a bare address or a CIDR block.
+# The most specific prefix wins regardless of the order written here.
+rules: []
+# Examples:
+# rules:
+#   - ip: 203.0.113.42        # single abusive client, throttled hard
+#     requests: 1
+#     per: 1s
+#     burst: 1
+#   - ip: 198.51.100.0/24     # noisy partner range
+#     requests: 5
+#     per: 1s
+#     burst: 10
+#   - ip: 192.0.2.7           # trusted integration, raised allowance
+#     requests: 100
+#     per: 1s
+#     burst: 200
+
+# Upper bound on tracked source IPs. The bucket map is itself an attack
+# surface, so the least recently seen entries are evicted past this point.
+max_tracked_ips: 100000
